@@ -15,21 +15,38 @@ class RemoteProcess {
 
     public $timeout = 60;
 
+    /**
+     * @param string $host
+     * @param ZMQContext $context
+     */
     public function __construct($host = 'localhost', $context = null) {
         $this->context = $context ?: new ZMQContext();
         $this->control = $this->context->getSocket(ZMQ::SOCKET_REQ);
         $this->control->connect("tcp://{$host}:7777");
-        //$this->control->setSockOpt(ZMQ::SOCKOPT_LINGER, 1000);
-        //$this->control->setSockOpt(ZMQ::SOCKOPT_SNDBUF, 4000);
         $this->host = $host;
     }
 
+    /**
+     * @param string $cmd
+     * @param string|null $working_path
+     * @param array|null $env
+     * @return RemoteProcess
+     */
     public static function run($cmd, $working_path = null, $env = null) {
         $p = new RemoteProcess();
         $p->open($cmd, $working_path, $env);
         return $p;
     }
 
+    /**
+     * Start a new process
+     * 
+     * @param string $cmd
+     * @param string|null $working_path
+     * @param array|null $env
+     * @return RemoteProcess
+     * @throws Exception
+     */
     public function open($cmd, $working_path = null, $env = null) {
         $this->cmd = $cmd;
         $this->working_path = $working_path;
@@ -66,6 +83,12 @@ class RemoteProcess {
         }
     }
 
+    /**
+     * Wait for the process to have more output, or finish if $closed is true
+     * 
+     * @param bool $closed
+     * @return RemoteProcess
+     */
     public function wait($closed = false) {
         if(!$closed) {
             $poll = new ZMQPoll();
@@ -91,6 +114,13 @@ class RemoteProcess {
         return $this;
     }
 
+    /**
+     * Send input to the process, and close STDIN if $moreInput is false
+     * 
+     * @param string $content
+     * @param bool $moreInput
+     * @return RemoteProcess
+     */
     public function stdin($content, $moreInput = false) {
         $socket = $this->sockets['stdin'];
         $socket->send($content);
@@ -106,6 +136,21 @@ class RemoteProcess {
         return $this;
     }
 
+    /**
+     * Write to STDIN
+     * 
+     * @param string $content
+     */
+    public function write($content) {
+        $this->stdin($content, true);
+    }
+
+    /**
+     * Read from STDOUT, wait for the process to finish if $complete is true
+     * 
+     * @param bool $complete
+     * @return string
+     */
     public function stdout($complete = false) {
         $socket = $this->sockets['stdout'];
         $message = '';
@@ -140,6 +185,12 @@ class RemoteProcess {
         return $message;
     }
 
+    /**
+     * Read from STDERR, wait for the process to finish if $complete is true
+     * 
+     * @param bool $complete
+     * @return string
+     */
     public function stderr($complete=false) {
        $socket = $this->sockets['stderr'];
         $message = '';
@@ -174,6 +225,12 @@ class RemoteProcess {
         return $message;
     }
 
+    /**
+     * Close the process
+     * 
+     * @return array
+     * @throws Exception
+     */
     public function close() {
         $this->control->send(json_encode([
             'type' => 'close',
@@ -193,6 +250,12 @@ class RemoteProcess {
         }
     }
 
+    /**
+     * Get the status of the process
+     * 
+     * @return array
+     * @throws Exception
+     */
     public function status() {
         $this->control->send(json_encode([
             'type' => 'status',
