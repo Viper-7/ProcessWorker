@@ -61,6 +61,18 @@ class RemoteProcess {
         $message = $this->control->recv();
         $result = json_decode($message, true);
 
+        if($result['type'] == 'pending') {
+            do {
+                $this->control->send(json_encode([
+                    'type' => 'getPID',
+                    'uuid' => $result['uuid']
+                ]));
+                $message = $this->control->recv();
+                $result = json_decode($message, true);
+                sleep(1);
+            } while($result['type'] == 'pending');
+        }
+
         if($result['type'] == 'open') {
             $this->pid = $result['pid'];
             $this->ports = $result['ports'];
@@ -84,12 +96,13 @@ class RemoteProcess {
     }
 
     /**
-     * Wait for the process to have more output, or finish if $closed is true
+     * Wait for the process to have more output, for $closed seconds if specified, or until process end if $closed is true
      * 
-     * @param bool $closed
+     * @param bool|int $closed
      * @return RemoteProcess
      */
     public function wait($closed = false) {
+        $time = microtime(true);
         if(!$closed) {
             $poll = new ZMQPoll();
             $poll->add($this->sockets['stdout'], ZMQ::POLL_IN);
@@ -99,7 +112,7 @@ class RemoteProcess {
         }
 
         $status = $this->status();
-        if($closed) {
+        if($closed === true) {
             while($status['running']) {
                 sleep(1);
                 $status = $this->status();
@@ -108,6 +121,9 @@ class RemoteProcess {
             while(!$status['has_stdout'] && $status['running']) {
                 sleep(1);
                 $status = $this->status();
+                if(is_int($closed) && microtime(true) - $time > $closed) {
+                    break;
+                }
             }
         }
 
@@ -279,8 +295,9 @@ class RemoteProcess {
 }
 
 
-file_put_contents('public/test.jpg', (new RemoteProcess('localhost'))->open('convert - JPEG:-')->stdin(file_get_contents('test.png'))->stdout(true));
-
-$t = $p->open('echo hi && sleep 5 && echo hi');
+/*file_put_contents('public/test.jpg', (new RemoteProcess('localhost'))->open('convert - JPEG:-')->stdin(file_get_contents('test.png'))->stdout(true));
+*/
+$p = new RemoteProcess('localhost');
+$t = $p->open('echo hi');
 echo $t->stdout();
 echo $t->wait()->stdout();
