@@ -5,72 +5,72 @@ ProcessWorker is a PHP library for running processes within remote containers, a
 ## Usage
 
 ### Running a process
-
+```php
     $p = new RemoteProcess('localhost');
     $p->open('echo hi');
     echo $p->stdout();
-
+```
 ```
 hi
 ```
 
 ### Running a process with input
-
+```php
     $p = new RemoteProcess('localhost');
     $p->open('cat');
     $p->stdin('hi');
     echo $p->stdout();
-
+```
 ```
 hi
 ```
 
 ### Running a process with input, and waiting for it to finish
-
+```php
     $p = new RemoteProcess('localhost');
     $p->open('cat');
     $p->stdin('sleep 2 && hi');
     echo $p->wait(true)->stdout();
-
+```
 ```
 hi
 ```
 
 ### Running a process and progressively processing output
-
+```php
     $p = new RemoteProcess('localhost');
     $p->open('echo hi && sleep 2 && echo hi');
     echo $p->stdout();
     echo $p->wait()->stdout();
-
+```
 ```
 hi
 hi
 ```
 
 ### Converting a png to jpg
-
+```php
     $p = new RemoteProcess('localhost');
     $p->open('convert - JPEG:-');
     $p->stdin(file_get_contents('test.png'));
     file_put_contents('test.jpg', $p->stdout(true));
-
+```
 ### Running a process with a working path
-
+```php
     $p = new RemoteProcess('localhost');
     $p->open('pwd', '/tmp');
     echo $p->stdout();
-
+```
 ```
 /tmp
 ```
 
 ### Running a process with an environment
-
+```php
     $p = new RemoteProcess('localhost');
     $p->open('echo $FOO', '', ['FOO' => 'bar']);
     echo $p->stdout();
-
+```
 ```
 bar
 ```
