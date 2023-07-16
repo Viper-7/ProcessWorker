@@ -72,7 +72,10 @@ Response: {
     "type": "endInput",
     "pid": 12345
 }
+
+
 */
+
 
 class ProcessWorker {
     protected $process_handles = [];        // [pid][control|stdin|stdout|stderr] = resource
@@ -151,8 +154,8 @@ class ProcessWorker {
 
             if(!$this->active) {
                 $diff = microtime(true) - $time;
-                if($diff < 0.1) {
-                    usleep((int)(100000 - ($diff * 1000000)));
+                if($diff < 0.01) {
+                    usleep((int)(10000 - ($diff * 1000000)));
                     break;
                 }
             }
