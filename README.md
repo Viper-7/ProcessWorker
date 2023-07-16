@@ -10,12 +10,20 @@ ProcessWorker is a PHP library for running processes within remote containers, a
     $p->open('echo hi');
     echo $p->stdout();
 
+```
+hi
+```
+
 ### Running a process with input
 
     $p = new RemoteProcess('localhost');
     $p->open('cat');
     $p->stdin('hi');
     echo $p->stdout();
+
+```
+hi
+```
 
 ### Running a process with input, and waiting for it to finish
 
@@ -24,12 +32,21 @@ ProcessWorker is a PHP library for running processes within remote containers, a
     $p->stdin('sleep 2 && hi');
     echo $p->wait(true)->stdout();
 
+```
+hi
+```
+
 ### Running a process and progressively processing output
 
     $p = new RemoteProcess('localhost');
     $p->open('echo hi && sleep 2 && echo hi');
     echo $p->stdout();
     echo $p->wait()->stdout();
+
+```
+hi
+hi
+```
 
 ### Converting a png to jpg
 
@@ -44,11 +61,19 @@ ProcessWorker is a PHP library for running processes within remote containers, a
     $p->open('pwd', '/tmp');
     echo $p->stdout();
 
+```
+/tmp
+```
+
 ### Running a process with an environment
 
     $p = new RemoteProcess('localhost');
     $p->open('echo $FOO', '', ['FOO' => 'bar']);
     echo $p->stdout();
+
+```
+bar
+```
 
 
 ## Notes
