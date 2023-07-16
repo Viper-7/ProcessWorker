@@ -59,27 +59,49 @@ Response: {
     }
 }
 
+
+=== End Input ===
+Closes the STDIN stream for a process, required for some commands to begin processing
+
+Request: {
+    "type": "endInput",
+    "pid": 12345
+}
+
+Response: {
+    "type": "endInput",
+    "pid": 12345
+}
+
+
 */
 
 
 class ProcessWorker {
-    protected $process_handles = [];
-    protected $zmq_context = null;
-    protected $control_port = 7777;
-    protected $control_socket = null;
-    protected $portrange = '40000-60000';
-    protected $temp_files = [];
-    protected $socket_map = [];
-    protected $port_map = [];
-    protected $port_usage = [];
-    protected $active = false;
-    protected $inactive_timeout = 300;
-    protected $inactive = [];
-    protected $pipes = []; // [pid][stdin|stdout|stderr] = ZMQSocket
-    protected $incoming = [];
+    protected $process_handles = [];        // [pid][control|stdin|stdout|stderr] = resource
+    protected $zmq_context = null;          // ZMQContext
+    protected $control_port = 7777;         // int
+    protected $control_socket = null;       // ZMQSocket
+    protected $portrange = '40000-60000';   // string [port-port]
+    protected $temp_files = [];             // [pid][stdout|stderr] = string [path]
+    protected $socket_map = [];             // [pid][event|stdin|stdout|stderr] = ZMQSocket
+    protected $port_map = [];               // [pid][event|stdin|stdout|stderr] = int [port]
+    protected $port_usage = [];             // [port] = int [0|1|time]
+    protected $inactive = [];               // [pid] = int [time]
+    protected $pipes = [];                  // [pid][stdin|stdout|stderr] = ZMQSocket
+    protected $incoming = [];               // [pid][stdout|stderr] = string [buffer]
+    protected $active = false;          
 
-    public $logLevel = 1;
+    public $inactive_timeout = 300;         // int [seconds]
+    public $logLevel = 0;                   // int [0-3]
 
+    /**
+     * Log a message to error handler (stdout)
+     * 
+     * @param $msg string|mixed
+     * @param $prefix string
+     * @param $level int
+     */
     function debug($msg, $prefix = null, $level=0) {
         if($level > $this->logLevel) return;
         if($prefix) {
@@ -92,6 +114,13 @@ class ProcessWorker {
         }
     }
 
+    /**
+     * Setup the worker
+     * 
+     * @param $control_port int
+     * @param $port_range string [port-port]
+     * @param $context ZMQContext
+     */
     public function __construct($control_port = 7777, $port_range = null, $context = null) {
         if(!$context) $context = new ZMQContext();
         $this->zmq_context = $context;
@@ -103,21 +132,44 @@ class ProcessWorker {
         $this->debug("Listening on port {$this->control_port}");
     }
 
+    /**
+     * Run the process worker endlessly
+     */
     public function run() {
         while(1) {
             $this->poll();
         }
     }
-    
+
+    /**
+     * Poll for incoming messages for 100ms
+     */
     public function poll() {
+        $time = microtime(true);
         $this->active = false;
 
-        $this->pollInbound();
-        $this->pollOutbound();
+        do {
+            $this->pollInbound();
+            $this->pollOutbound();
 
-        if(!$this->active) usleep(100000);
+            if(!$this->active) {
+                $diff = microtime(true) - $time;
+                if($diff < 0.1) {
+                    usleep(100000 - ($diff * 1000000));
+                    break;
+                }
+            }
+        } while(microtime(true) - $time < 0.1);
     }
 
+    /**
+     * Configures another process to receive all stdout from this one
+     * 
+     * @param $pid int
+     * @param $channel string [stdout|stderr]
+     * @param $target string [host:port]
+     * @return $this
+     */
     public function pipe($pid, $channel, $target) {
         if(!isset($this->process_handles[$pid][$channel])) {
             throw new Exception("Invalid PID/channel");
@@ -126,8 +178,16 @@ class ProcessWorker {
         $socket = new ZMQSocket($this->zmq_context, ZMQ::SOCKET_PUSH);
         $socket->connect("tcp://{$target}");
         $this->pipes[$pid][$channel] = $socket;
+
+        return $this;
     }
 
+    /**
+     * Returns the status of a process
+     * 
+     * @param $pid int
+     * @return array
+     */
     public function getChildStatus($pid) {
         if (!isset($this->process_handles[$pid]['control'])) {
             throw new Exception("Invalid pid");
@@ -152,6 +212,12 @@ class ProcessWorker {
         return $status;
     }
     
+    /**
+     * Close a process and cleanup
+     * 
+     * @param $pid int
+     * @param $reason string
+     */
     public function closeChild($pid, $reason = null) {
         if (!isset($this->process_handles[$pid]['control'])) {
             throw new Exception("Invalid pid");
@@ -182,6 +248,14 @@ class ProcessWorker {
         $this->handleClose($pid);
     }
 
+    /**
+     * Callback for handling process open events
+     * 
+     * @param $pid int
+     * @param $cmd string
+     * @param $working_path string
+     * @param $env array
+     */
     protected function handleOpen($pid, $cmd, $working_path, $env) {
         $this->sendJSONMessage($pid, [
             'type' => 'open',
@@ -191,6 +265,11 @@ class ProcessWorker {
         ]);
     }
 
+    /**
+     * Callback for handling process close events
+     * 
+     * @param $pid int
+     */
     protected function handleClose($pid) {
         $this->sendJSONMessage($pid, [
             'type' => 'close'
@@ -211,12 +290,25 @@ class ProcessWorker {
         $this->debug("Closed child $pid", null, 3);
     }
 
+    /**
+     * Find missing required parameters
+     * 
+     * @param $command array
+     * @param $fields array
+     * @return array
+     */
     protected function validateCommand($command, $fields) {
         $keys = array_keys($command);
         $missing = array_diff($fields, $keys);
         return $missing;
     }
 
+    /**
+     * Process a socket control instruction
+     * 
+     * @param $command array
+     * @return array
+     */
     protected function handleCommand($command) {
         $this->debug(json_encode($command), 'Received Command', 1);
 
@@ -228,6 +320,20 @@ class ProcessWorker {
         }
 
         switch($command['type']) {
+            /*
+             * Open a new process
+             * 
+             * Required fields:
+             * - type           string      'open'
+             * - cmd            string      Command to execute
+             * - working_path   string      Working directory
+             * - env            array       Environment variables
+             * 
+             * Returns:
+             * - type           string      'open'
+             * - pid            int         Process ID
+             * - ports          array       [event, stdin, stdout, stderr]
+             */
             case 'open':
                 $errors = $this->validateCommand($command, ['cmd', 'working_path', 'env']);
                 if($errors) {
@@ -250,6 +356,22 @@ class ProcessWorker {
                     ];
                 }
                 break;
+
+            /*
+             * Pipe a process's stdout or stderr to another process
+             * 
+             * Required fields:
+             * - type           string      'pipe'
+             * - pid            int         Process ID
+             * - channel        string      'stdout' or 'stderr'
+             * - target         string      'host:port'
+             *  
+             * Returns:
+             * - type           string      'pipe'
+             * - pid            int         Process ID
+             * - channel        string      'stdout' or 'stderr'
+             * - target         string      'host:port'
+             */
             case 'pipe':
                 $errors = $this->validateCommand($command, ['pid', 'channel', 'target']);
                 if($errors) {
@@ -269,6 +391,17 @@ class ProcessWorker {
                     'target' => $target
                 ];
                 break;
+            /*
+             * Close a process
+             * 
+             * Required fields:
+             * - type           string      'close'
+             * - pid            int         Process ID
+             * 
+             * Returns:
+             * - type           string      'close'
+             * - pid            int         Process ID
+             */
             case 'close':
                 $errors = $this->validateCommand($command, ['pid']);
                 if($errors) {
@@ -283,6 +416,17 @@ class ProcessWorker {
                     'pid' => $command['pid']
                 ];
                 break;
+            /*
+             * Complete writing to a process's STDIN
+             * 
+             * Required fields:
+             * - type           string      'endInput'
+             * - pid            int         Process ID
+             * 
+             * Returns:
+             * - type           string      'endInput'
+             * - pid            int         Process ID
+             */
             case 'endInput':
                 $errors = $this->validateCommand($command, ['pid']);
                 if($errors) {
@@ -300,6 +444,18 @@ class ProcessWorker {
                     'pid' => $pid
                 ];
                 break;
+            /*
+             * Get the status of a process
+             * 
+             * Required fields:
+             * - type           string      'status'
+             * - pid            int         Process ID
+             * 
+             * Returns:
+             * - type           string      'status'
+             * - pid            int         Process ID
+             * - status         array       Process status {command, pid, running, signaled, stopped, exitcode}
+             */
             case 'status':
                 $errors = $this->validateCommand($command, ['pid']);
                 if($errors) {
@@ -332,6 +488,13 @@ class ProcessWorker {
         $this->sendMessage($pid, json_encode($message), $channel);
     }
 
+    /**
+     * Send a message to a socket listener
+     * 
+     * @param $pid int
+     * @param $message string
+     * @param $channel string [event|stdin|stdout|stderr]
+     */
     protected function sendMessage($pid, $message, $channel='event') {
         if(!isset($this->socket_map[$pid][$channel])) {
             throw new Exception("Invalid channel");
@@ -346,6 +509,12 @@ class ProcessWorker {
         }
     }
 
+    /**
+     * Check if a port is available
+     * 
+     * @param $port int
+     * @return bool
+     */
     protected function checkPort($port) {
         if(!isset($this->port_usage) || $this->port_usage[$port] === 0) return false;
         if(isset($this->port_usage) && $this->port_usage[$port] !== 1 && time() - $this->port_usage[$port] < 60) {
@@ -362,6 +531,11 @@ class ProcessWorker {
         }
     }
 
+    /**
+     * Allocate a set of ports for a new process
+     * 
+     * @return array
+     */
     protected function allocatePorts() {
         $portrange = explode('-', $this->portrange);
         foreach(range($portrange[0], $portrange[1], 4) as $port) {
@@ -400,6 +574,11 @@ class ProcessWorker {
         return $socket;
     }
 
+    /**
+     * Attempt to create the sockets for a new process
+     * 
+     * @return array
+     */
     protected function spawnSockets() {
         $ports = $this->allocatePorts();
         $sockets = [];
@@ -413,6 +592,13 @@ class ProcessWorker {
         }
     }
 	
+    /**
+     * Helper function to check stream contents on Windows platforms
+     * 
+     * @param $conn resource
+     * @param $prop string [stdout|stderr]
+     * @return bool
+     */
 	protected function hasData($conn, $prop) {
         if(!isset($conn[$prop])) return false;
 		$stream = $conn[$prop];
@@ -431,6 +617,14 @@ class ProcessWorker {
         }
 	}
 
+    /**
+     * Attempt to spawn a new process
+     * 
+     * @param $cmd string
+     * @param $path string
+     * @param $env array
+     * @return int|bool
+     */
     protected function attemptSpawn($cmd, $path, $env) {
         $socket = $this->spawnSockets();
         if($socket) {
@@ -446,6 +640,9 @@ class ProcessWorker {
         }
     }
 
+    /**
+     * Process data coming from the STDIN socket headed to the process
+     */
     protected function pollOutbound() {
         $map = [];
         $poll = new ZMQPoll();
@@ -487,9 +684,13 @@ class ProcessWorker {
         }
     }
 
+    /**
+     * Process data coming from the process's STDOUT and STDERR streams
+     */
     protected function pollInbound() {
         $read = $write = $except = array();
 
+        // Grab all active process streams
         foreach($this->process_handles as $pid => $process) {
             $status = proc_get_status($process['control']);
             if(PHP_OS == 'WINNT') {
@@ -509,24 +710,30 @@ class ProcessWorker {
             }
         }
 
+        // Process data already in the buffer
         if(!empty($this->incoming)) {
             foreach($this->incoming as $pid => $channels) {
                 foreach($channels as $channel => $lines) {
                     if(!isset($this->socket_map[$pid][$channel])) {
+                        // If the socket is gone, just drop the data
                         unset($this->incoming[$pid][$channel]);
                         continue;
                     }
+
+                    // Check if the socket is ready to receive data
                     $r = $w = [];
                     $poll = new ZMQPoll();
                     $poll->add($this->socket_map[$pid][$channel], ZMQ::POLL_OUT);
                     $ready = $poll->poll($r, $w, 0);
                     if($w) {
+                        // It is. Flag us as active to minimize transfer delays
                         $this->active = true;
                         $line = array_shift($lines);
                         foreach($w as $s) {
                             $this->debug("Sending $channel to $pid stream", null, 3);
                             $s->send($line);
-                            $this->debug("Done Sending $channel to $pid stream", null, 3);
+
+                            // If there's more data, and the client is taking it, keep relaying it
                             do {
                                 $r = $w = $e = [];
                                 $r[] = $this->process_handles[$pid][$channel];
@@ -534,14 +741,18 @@ class ProcessWorker {
                                 if($r) {
                                     $line = fread($this->process_handles[$pid][$channel], 3800);
                                     if($line) {
+                                        // Need to recheck the client every time. @TODO @BLOCKING
                                         $s->send($line);
                                     } else {
                                         break;
                                     }
                                 }
                             } while($r);
+                            $this->debug("Done Sending $channel to $pid stream", null, 3);
                         }
                     }
+
+                    // Strip the line we just processed from the buffer
                     if($lines)
                         $this->incoming[$pid][$channel] = $lines;
                     else
@@ -550,15 +761,20 @@ class ProcessWorker {
             }
         }
 
+        // Check for new data on STDOUT and STDERR
         if (count($read) > 0) {
             $ready = stream_select($read, $write, $except, 0);
             if ($ready === false) {
                 throw new Exception("stream_select failed");
             }
             if ($read) {
+                // Flag us as active to minimize transfer delays
                 $this->active = true;
+
                 foreach($read as $process) {
-                    if(feof($process)) continue;
+                    if(feof($process)) continue;    // I don't think this is still doing anything @TODO
+                    
+                    // Find the PID based on the process handle
                     $pid = 0;
                     foreach($this->process_handles as $id => $channels) {
                         if($process == $channels['stdout'] || $process == $channels['stderr']) {
@@ -568,12 +784,14 @@ class ProcessWorker {
                     }
                     $channel = $process == $this->process_handles[$pid]['stdout'] ? 'stdout' : 'stderr';
 
+                    // Read the next chunk into the buffer
                     $line = fread($process, 3800);
                     if($line) {
                         $this->incoming[$pid][$channel][] = $line;
                         $this->debug("Received $channel from $pid", null, 3);
+
                         if(isset($this->pipes[$pid][$channel])) {
-                            $this->debug('Piping');
+                            // This needs validation that the pipe is actually ready @TODO @BLOCKING
                             $this->pipes[$pid][$channel]->send($line);
                         }
                     }
@@ -581,6 +799,7 @@ class ProcessWorker {
             }
         }
 
+        // Cleanup inactive sockets
         foreach($this->port_usage as $port => $expiry) {
             if($expiry === 1 || time() - $expiry < 30) continue;
 
@@ -596,6 +815,7 @@ class ProcessWorker {
             return false;
         }
 
+        // Cleanup inactive processes
         foreach($this->process_handles as $pid => $process) {
             if(!isset($this->inactive[$pid])) {
                 $status = proc_get_status($process['control']);
@@ -610,6 +830,14 @@ class ProcessWorker {
         }
     }
 
+    /**
+     * Spawn a new process
+     * 
+     * @param $cmd string
+     * @param $working_path string
+     * @param $env array
+     * @return int
+     */
     protected function spawnChild($cmd, $working_path, $env = null) {
 		if(PHP_OS == 'WINNT') {
 			$stdoutFile = tempnam(sys_get_temp_dir(), 'out');
