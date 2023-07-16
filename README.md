@@ -57,7 +57,7 @@ ProcessWorker is a PHP library for running processes within remote containers, a
 * The default timeout is 60 seconds, but you can change it with `$p->timeout = 10;`
 * `$p->stdout(true)` and `$p->stderr(true)` will wait for the process to finish before returning
 * There is a difference between `$p->wait(true)->stdout()` and `$p->wait()->stdout(true)`. The first will BLOCK if the process generates more data than the buffers can store.
-* `$p->wait()` will wait forever as long as the process is still connected and running, if you do not specify a timeout.
+* `$p->wait(true)` will wait forever as long as the process is still connected and running, if you do not specify a timeout.
 * `$p->stdin('hi')` will close STDIN, so can only be used once per process, while `$p->stdin('hi', true)` and `$p->write('hi')` are reusable.
 * Most methods are chainable, so you can do `$p->open('cat')->stdin('Hello, World!')->stdout();`
 * You can check if the process has output with `$p->status()['has_stdout']` and `$p->status()['has_stderr']`
