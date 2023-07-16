@@ -63,13 +63,13 @@ class RemoteProcess {
 
         if($result['type'] == 'pending') {
             do {
+                sleep(1);
                 $this->control->send(json_encode([
                     'type' => 'getPID',
                     'uuid' => $result['uuid']
                 ]));
                 $message = $this->control->recv();
                 $result = json_decode($message, true);
-                sleep(1);
             } while($result['type'] == 'pending');
         }
 
@@ -293,6 +293,7 @@ class RemoteProcess {
         }
     }
 }
+
 
 
 /*file_put_contents('public/test.jpg', (new RemoteProcess('localhost'))->open('convert - JPEG:-')->stdin(file_get_contents('test.png'))->stdout(true));

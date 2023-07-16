@@ -82,7 +82,7 @@ class ProcessWorker {
     protected $zmq_context = null;          // ZMQContext
     protected $control_port = 7777;         // int
     protected $control_socket = null;       // ZMQSocket
-    protected $portrange = '10000-20000';   // string [port-port]
+    protected $portrange = '10000-11000';   // string [port-port]
     protected $temp_files = [];             // [pid][stdout|stderr] = string [path]
     protected $socket_map = [];             // [pid][event|stdin|stdout|stderr] = ZMQSocket
     protected $port_map = [];               // [pid][event|stdin|stdout|stderr] = int [port]
@@ -93,8 +93,10 @@ class ProcessWorker {
     protected $active = 0;          
     protected $lastAnnounce = 0;
     protected $createQueue = [];
+    protected $tasksProcessed = 0;
+    protected $tasksRejected = 0;
 
-    public $inactive_timeout = 300;         // int [seconds]
+    public $inactive_timeout = 60;           // int [seconds]
     public $logLevel = 0;                   // int [0-3]
 
     /**
@@ -166,6 +168,7 @@ class ProcessWorker {
 
         if(time() - $this->lastAnnounce > 1) {
             $this->lastAnnounce = time();
+            $this->debug('=========================================');
             $this->debug("Active: " . $this->active, null, 0);
             $this->debug("Inactive: " . count($this->inactive), null, 0);
             $this->debug("Port Usage: " . count($this->port_usage), null, 0);
@@ -176,6 +179,8 @@ class ProcessWorker {
             $this->debug("Pipes: " . count($this->pipes), null, 0);
             $this->debug("Incoming: " . count($this->incoming), null, 0);
             $this->debug("Command queue: " . count($this->createQueue), null, 0);
+            $this->debug("Tasks processed: " . $this->tasksProcessed, null, 0);
+            $this->debug("Tasks rejected: " . $this->tasksRejected, null, 0);
         }
     }
 
@@ -237,16 +242,21 @@ class ProcessWorker {
      */
     public function closeChild($pid, $reason = null) {
         if (!isset($this->process_handles[$pid]['control'])) {
-            throw new Exception("Invalid pid");
+            $status = shell_exec("ps -o pid | grep $pid");
+            if($status) {
+                $this->debug("Killing $pid", null, 3);
+                shell_exec("kill -9 $pid");
+            }
+            $this->handleClose($pid);
+            //throw new Exception("Invalid pid");
+            return;
         }
         if($reason) $reason = " due to: " . $reason;
         $this->debug("Closing child $pid{$reason}", null, 2);
         $process = $this->process_handles[$pid]['control'];
         $status = proc_get_status($process);
+        $this->tasksProcessed++;
         
-        $ports = $this->port_map[$pid];
-        $this->debug($ports, "Closing ports", 3);
-
         if ($status['running']) {
             proc_terminate($process);
         }
@@ -256,12 +266,7 @@ class ProcessWorker {
             $this->debug("Killing $pid", null, 3);
             shell_exec("kill -9 $pid");
         }
-        if(isset($this->inactive[$pid])) {
-            unset($this->inactive[$pid]);
-        }
-        if(isset($this->pipes[$pid])) {
-            unset($this->pipes[$pid]);
-        }
+
         $this->handleClose($pid);
     }
 
@@ -291,15 +296,19 @@ class ProcessWorker {
         $this->sendJSONMessage($pid, [
             'type' => 'close'
         ]);
-        foreach($this->port_map[$pid] as $key => $port) {
-            $socket = $this->socket_map[$pid][$key];
-            $socket->unbind("tcp://*:" . $port);
-            $this->port_usage[$port] = time();
+        if(isset($this->port_map[$pid])) {
+            foreach($this->port_map[$pid] as $key => $port) {
+                $socket = $this->socket_map[$pid][$key];
+                $socket->unbind("tcp://*:" . $port);
+                $this->port_usage[$port] = time();
+                //unset($this->port_usage[$port]);
+            }
         }
         if(isset($this->incoming[$pid])) {
             unset($this->incoming[$pid]);
         }
-        unset($this->process_handles[$pid]);
+        if(isset($this->process_handles[$pid]))
+            unset($this->process_handles[$pid]);
         if(PHP_OS == 'WINNT') {
             unlink($this->temp_files[$pid]['stdout']);
             unlink($this->temp_files[$pid]['stderr']);
@@ -309,8 +318,16 @@ class ProcessWorker {
             $key = array_search($pid, $this->uuid_pids);
             unset($this->uuid_pids[$key]);
         }
-        unset($this->socket_map[$pid]);
-        unset($this->port_map[$pid]);
+        if(isset($this->inactive[$pid])) {
+            unset($this->inactive[$pid]);
+        }
+        if(isset($this->pipes[$pid])) {
+            unset($this->pipes[$pid]);
+        }
+        if(isset($this->socket_map[$pid]))
+            unset($this->socket_map[$pid]);
+        if(isset($this->port_map[$pid]))
+            unset($this->port_map[$pid]);
         $this->debug("Closed child $pid", null, 3);
     }
 
@@ -543,7 +560,8 @@ class ProcessWorker {
      */
     protected function sendMessage($pid, $message, $channel='event') {
         if(!isset($this->socket_map[$pid][$channel])) {
-            throw new Exception("Invalid channel");
+            //throw new Exception("Invalid channel");
+            return;
         }
         $socket = $this->socket_map[$pid][$channel];
         $poll = new ZMQPoll();
@@ -568,16 +586,13 @@ class ProcessWorker {
                 if($key = array_search($port, $ports)) {
                     if(isset($this->process_handles[$pid])) {
                         $this->closeChild($pid);
-                    } else {
-                        // Should never hit this, orphaned socket with no process
-                        $this->debug("Closing orphaned socket $port", null, 0);
-                        $socket = $this->socket_map[$pid][$key];
-                        $socket->unbind("tcp://*:" . $port);
-                        unset($this->port_map[$pid]);
-                        unset($this->socket_map[$pid]);
-                        unset($this->port_usage[$port]);
                     }
-                    return true;
+
+                    $this->debug("Closing orphaned socket $port", null, 0);
+                    $socket = $this->socket_map[$pid][$key];
+                    $socket->unbind("tcp://*:" . $port);
+                    unset($this->port_map[$pid]);
+                    unset($this->socket_map[$pid]);
                 }
             }
             // The port has expired, we've checked all processes and it's not in use
@@ -704,7 +719,7 @@ class ProcessWorker {
      * Process data coming from the STDIN socket headed to the process
      */
     protected function pollOutbound() {
-        if(count($this->port_usage) < 100 && $this->createQueue) {
+        if(count($this->port_usage) < 200 && $this->createQueue) {
             $this->debug("Processing create queue", null, 3);
             list($key) = array_keys($this->createQueue);
             $command = $this->createQueue[$key];
@@ -730,27 +745,21 @@ class ProcessWorker {
         if ($read) {
             foreach($read as $socket) {
                 if($socket === $this->control_socket) {
-                    /*if(count($this->port_usage) > 80) {
-                        //$this->debug("Too many ports in use, clearing closed sockets aggressively", null, 3);
-                        foreach($this->port_usage as $port => $expiry) {
-                            if($expiry === 1 || time() - $expiry < 2) continue;
-
-                            foreach($this->port_map as $pid => $ports) {
-                                if($key = array_search($port, $ports)) {
-                                    $this->closeChild($pid);
-                                    unset($this->port_usage[$port]);
-                                    break;
-                                }
-                            }
-                        }
-                    }*/
-
                     $this->active++;
                     $message = $socket->recv();
                     $this->debug($message, "Received command", 3);
                     $command = json_decode($message, true);
-                    if(isset($command['type']) && $command['type'] == 'open' && count($this->port_usage) > 120) {
-                        //$this->debug("Extreme hot water, ignoring command messages temporarily", null, 3);
+                    if(isset($command['type']) && $command['type'] == 'open' && count($this->port_usage) > 200) {
+                        // Extreme hot water handling
+                        if(count($this->createQueue) > 200) {
+                            $this->tasksRejected++;
+                            $socket->send(json_encode([
+                                'type' => 'error',
+                                'message' => 'Too many ports in use'
+                            ]));
+                            continue;
+                        }
+
                         $uuid = hash('sha256', uniqid('', true)); // @TODO ugly....
                         $this->createQueue[$uuid] = $command;
                         $result = [
@@ -903,10 +912,15 @@ class ProcessWorker {
 
         // Cleanup inactive sockets
         foreach($this->port_usage as $port => $expiry) {
-            if($expiry === 1 || time() - $expiry < 30) continue;
+            if($expiry === 1 || time() - $expiry < 2) continue;
 
             foreach($this->port_map as $pid => $ports) {
                 if($key = array_search($port, $ports)) {
+                    if(isset($this->process_handles[$pid])) {
+                        $this->closeChild($pid);
+                    }
+                    // Should never hit this, orphaned socket with no process
+                    $this->debug("Closing orphaned socket $port", null, 0);
                     $socket = $this->socket_map[$pid][$key];
                     $socket->unbind("tcp://*:" . $port);
                     unset($this->port_map[$pid]);
@@ -922,11 +936,18 @@ class ProcessWorker {
             if(!isset($this->inactive[$pid])) {
                 $status = proc_get_status($process['control']);
                 if($status['running'] == false) {
+                    
                     $this->inactive[$pid] = time();
                 }
             } else {
-                if(time() - $this->inactive[$pid] > $this->inactive_timeout) {
-                    $this->closeChild($pid, 'inactive');
+                if($this->createQueue) {
+                    if(time() - $this->inactive[$pid] > 5) {
+                        $this->closeChild($pid, 'inactive');
+                    }
+                } else {
+                    if(time() - $this->inactive[$pid] > $this->inactive_timeout) {
+                        $this->closeChild($pid, 'inactive');
+                    }
                 }
             }
         }
